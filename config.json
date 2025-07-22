@@ -1,0 +1,42 @@
+{
+  "dashscope_api_key": "",
+  "ai_model": "qwen-max",
+  "embedding_model": "text-embedding-v4",
+  "embedding_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "chunk_size": 1000,
+  "chunk_overlap": 200,
+  "max_tokens_per_chunk": 500,
+  "batch_size": 20,
+  "supported_file_types": [
+    ".py", ".ts", ".java", ".cpp", ".c", ".h", ".hpp",
+    ".cs", ".php", ".rb", ".go", ".rs", ".swift", ".kt",
+    ".scala", ".clj", ".hs", ".ml", ".r", ".m", ".sh",
+    ".sql", ".html", ".scss", ".less", ".vue",
+    ".jsx", ".tsx", ".json", ".xml", ".yaml", ".yml",
+    ".md", ".txt", ".rst", ".tex"
+  ],
+  "ignore_patterns": [
+    "*.pyc", "*.pyo", "*.pyd", "__pycache__", ".git",
+    ".svn", ".hg", ".bzr", "node_modules", ".venv",
+    "venv", ".env", "*.log", "*.tmp", "*.temp",
+    ".DS_Store", "Thumbs.db", "*.swp", "*.swo",
+    ".idea", ".vscode", "*.min.js", "*.min.css",
+    "dist", "build", "target", "bin", "obj"
+  ],
+  "max_file_size_mb": 10,
+  "rate_limit_requests_per_minute": 60,
+  "cache_embeddings": true,
+  "obfuscate_paths": true,
+  "include_git_history": false,
+  "vector_db_config": {
+    "similarity_threshold": 0.7,
+    "max_results": 20,
+    "index_type": "flat"
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "code_index.log",
+    "max_size_mb": 50,
+    "backup_count": 3
+  }
+}
