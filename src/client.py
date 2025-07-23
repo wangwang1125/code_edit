@@ -1,5 +1,7 @@
 import os
 import hashlib
+import shutil
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
 import time
@@ -475,6 +477,173 @@ class CodeIndexClient:
     
     # ==================== 代码编辑功能 ====================
     
+    async def search_and_analyze_edit(self, 
+                                    query: str, 
+                                    project_path: Optional[str] = None, 
+                                    top_k: int = 10,
+                                    filter_language: Optional[str] = None, 
+                                    filter_file_type: Optional[str] = None,
+                                    use_hybrid_search: bool = True) -> Dict[str, Any]:
+        """搜索代码并直接分析语义编辑请求 - 合并操作避免重复"""
+        if project_path is None:
+            project_path = self.current_project_path
+        
+        if not project_path:
+            raise ValueError("No project specified. Please provide project_path or index a project first.")
+        
+        # 1. 执行搜索
+        print(f"搜索代码: {query}")
+        search_results = await self.search(
+            query=query, 
+            project_path=project_path, 
+            top_k=top_k,
+            filter_language=filter_language,
+            filter_file_type=filter_file_type,
+            use_hybrid_search=use_hybrid_search
+        )
+        
+        # 2. 如果有搜索结果，直接进行语义编辑分析
+        analysis_result = {
+            'search_results': search_results,
+            'search_count': len(search_results),
+            'edits': [],
+            'analysis_success': False,
+            'error': None
+        }
+        
+        if search_results:
+            try:
+                print(f"基于 {len(search_results)} 个搜索结果分析语义编辑...")
+                edits = await self.analyze_code_modification(
+                    request=query,
+                    search_results=search_results,
+                    project_path=project_path
+                )
+                
+                analysis_result.update({
+                    'edits': [edit.to_dict() for edit in edits] if edits else [],
+                    'analysis_success': len(edits) > 0,
+                    'edit_count': len(edits)
+                })
+                
+                if edits:
+                    # 计算平均置信度
+                    avg_confidence = sum(edit.confidence for edit in edits) / len(edits)
+                    analysis_result['average_confidence'] = avg_confidence
+                    
+                    print(f"生成了 {len(edits)} 个语义编辑操作，平均置信度: {avg_confidence:.2f}")
+                    for i, edit in enumerate(edits, 1):
+                        print(f"  编辑 {i}: {edit.description}")
+                        print(f"    类型: {edit.edit_type.value}")
+                        print(f"    置信度: {edit.confidence:.2f}")
+                        if edit.location:
+                            print(f"    位置: {edit.location.symbol_name} ({edit.location.start_line}-{edit.location.end_line}行)")
+                else:
+                    print("未生成有效的语义编辑操作")
+                    analysis_result['error'] = "无法生成有效的语义编辑操作"
+                    
+            except Exception as e:
+                print(f"语义编辑分析失败: {e}")
+                analysis_result.update({
+                    'analysis_success': False,
+                    'error': str(e)
+                })
+        else:
+            print("没有找到相关的代码，无法进行语义编辑分析")
+            analysis_result['error'] = "没有找到相关的代码"
+        
+        return analysis_result
+    
+    async def search_and_edit(self, 
+                            query: str, 
+                            project_path: Optional[str] = None, 
+                            top_k: int = 10,
+                            filter_language: Optional[str] = None, 
+                            filter_file_type: Optional[str] = None,
+                            use_hybrid_search: bool = True,
+                            auto_apply: bool = False,
+                            confidence_threshold: float = 0.7,
+                            generate_patch: bool = False) -> Dict[str, Any]:
+        """搜索代码并生成编辑建议 - 支持差异补丁模式"""
+        # 1. 先进行搜索和分析
+        analysis_result = await self.search_and_analyze_edit(
+            query=query,
+            project_path=project_path,
+            top_k=top_k,
+            filter_language=filter_language,
+            filter_file_type=filter_file_type,
+            use_hybrid_search=use_hybrid_search
+        )
+        
+        # 2. 构建基础结果
+        edit_result = {
+            'search_results': analysis_result['search_results'],
+            'search_count': analysis_result['search_count'],
+            'edits': analysis_result['edits'],
+            'analysis_success': analysis_result['analysis_success'],
+            'edit_applied': False,
+            'applied_edits': [],
+            'error': analysis_result.get('error'),
+            'warnings': [],
+            'patches': []  # 新增：差异补丁列表
+        }
+        
+        if analysis_result['analysis_success'] and analysis_result['edits']:
+            avg_confidence = analysis_result.get('average_confidence', 0)
+            
+            # 3. 生成差异补丁（如果启用）
+            if generate_patch:
+                try:
+                    patches = await self.generate_diff_patches(
+                        query=query,
+                        search_results=analysis_result['search_results'],
+                        project_path=project_path
+                    )
+                    edit_result['patches'] = patches
+                    print(f"生成了 {len(patches)} 个差异补丁")
+                except Exception as e:
+                    edit_result['warnings'].append(f"生成差异补丁失败: {str(e)}")
+                    print(f"生成差异补丁失败: {e}")
+            
+            # 4. 自动应用编辑（如果启用且满足条件）
+            if auto_apply and avg_confidence >= confidence_threshold and not generate_patch:
+                try:
+                    print(f"置信度 {avg_confidence:.2f} >= {confidence_threshold}，自动应用编辑...")
+                    
+                    # 执行编辑
+                    edits, apply_result = await self.edit_code_with_plan(
+                        request=query,
+                        search_results=analysis_result['search_results'],
+                        project_path=project_path,
+                        auto_apply=True
+                    )
+                    
+                    if apply_result and apply_result['success']:
+                        edit_result.update({
+                            'edit_applied': True,
+                            'applied_edits': apply_result['applied_edits'],
+                            'backup_path': apply_result.get('backup_path'),
+                            'diff': apply_result.get('diff')
+                        })
+                        print(f"成功应用了 {len(apply_result['applied_edits'])} 个编辑操作")
+                    else:
+                        edit_result['error'] = apply_result.get('errors', ['编辑应用失败'])[0] if apply_result else '编辑应用失败'
+                        print(f"编辑应用失败: {edit_result['error']}")
+                        
+                except Exception as e:
+                    edit_result['error'] = f"编辑执行失败: {str(e)}"
+                    print(f"编辑执行失败: {e}")
+            else:
+                if generate_patch:
+                    edit_result['warnings'].append("已生成差异补丁，等待用户确认应用")
+                elif not auto_apply:
+                    edit_result['warnings'].append("未启用自动应用，需要手动确认编辑")
+                else:
+                    edit_result['warnings'].append(f"置信度 {avg_confidence:.2f} < {confidence_threshold}，跳过自动应用")
+                print(f"跳过自动应用编辑 (auto_apply={auto_apply}, confidence={avg_confidence:.2f}, generate_patch={generate_patch})")
+        
+        return edit_result
+    
     async def analyze_code_modification(self, 
                                       request: str, 
                                       search_results: List[Dict[str, Any]], 
@@ -570,6 +739,197 @@ class CodeIndexClient:
         
         return edits, result
     
+    async def generate_diff_patches(self, 
+                                  query: str, 
+                                  search_results: List[Dict], 
+                                  project_path: Optional[str] = None) -> List[Dict[str, Any]]:
+        """生成差异补丁而不直接修改文件"""
+        patches = []
+        
+        try:
+            # 1. 分析代码修改需求
+            edits = await self.analyze_code_modification(
+                request=query,
+                search_results=search_results,
+                project_path=project_path
+            )
+            
+            if not edits:
+                return patches
+            
+            # 2. 为每个编辑操作生成差异补丁
+            for edit in edits:
+                try:
+                    # 读取原始文件内容
+                    file_path = edit.location.file_path
+                    if not os.path.exists(file_path):
+                        continue
+                    
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        original_content = f.read()
+                    
+                    # 模拟应用编辑操作，生成修改后的内容
+                    modified_content = await self._simulate_edit_application(
+                        original_content, edit
+                    )
+                    
+                    # 生成差异补丁
+                    import difflib
+                    diff_lines = list(difflib.unified_diff(
+                        original_content.splitlines(keepends=True),
+                        modified_content.splitlines(keepends=True),
+                        fromfile=f"a/{os.path.basename(file_path)}",
+                        tofile=f"b/{os.path.basename(file_path)}",
+                        lineterm=''
+                    ))
+                    
+                    if diff_lines:
+                        patch_info = {
+                            'file_path': file_path,
+                            'edit_type': edit.edit_type.value,
+                            'description': edit.description,
+                            'confidence': edit.confidence,
+                            'diff': ''.join(diff_lines),
+                            'original_content': original_content,
+                            'modified_content': modified_content,
+                            'line_range': {
+                                'start': edit.location.start_line,
+                                'end': edit.location.end_line
+                            }
+                        }
+                        patches.append(patch_info)
+                        
+                except Exception as e:
+                    print(f"生成文件 {edit.location.file_path} 的差异补丁失败: {e}")
+                    continue
+            
+            return patches
+            
+        except Exception as e:
+            print(f"生成差异补丁失败: {e}")
+            return patches
+
+    async def _simulate_edit_application(self, original_content: str, edit) -> str:
+        """模拟应用编辑操作，返回修改后的内容"""
+        from .smart_semantic_editor import SmartSemanticEditor
+        
+        # 创建临时编辑器实例
+        editor = SmartSemanticEditor()
+        
+        # 将内容写入临时文件
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp_file:
+            temp_file.write(original_content)
+            temp_path = temp_file.name
+        
+        try:
+            # 应用编辑操作 - 注意：apply_edit不是异步方法，返回bool
+            success = editor.apply_edit(temp_path, edit)
+            
+            # 读取修改后的内容
+            if success:
+                with open(temp_path, 'r', encoding='utf-8') as f:
+                    modified_content = f.read()
+                return modified_content
+            else:
+                # 如果智能编辑失败，尝试简单的文本替换
+                return self._apply_simple_edit(original_content, edit)
+                
+        finally:
+            # 清理临时文件
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+
+    def _apply_simple_edit(self, content: str, edit) -> str:
+        """简单的编辑应用，用作备选方案"""
+        lines = content.splitlines()
+        
+        try:
+            if edit.edit_type.value == 'replace':
+                # 替换指定行范围
+                start_idx = max(0, edit.location.start_line - 1)
+                end_idx = min(len(lines), edit.location.end_line)
+                
+                new_lines = lines[:start_idx] + edit.new_content.splitlines() + lines[end_idx:]
+                return '\n'.join(new_lines)
+                
+            elif edit.edit_type.value == 'insert':
+                # 在指定位置插入
+                insert_idx = max(0, edit.location.start_line - 1)
+                new_lines = lines[:insert_idx] + edit.new_content.splitlines() + lines[insert_idx:]
+                return '\n'.join(new_lines)
+                
+            elif edit.edit_type.value == 'delete':
+                # 删除指定行范围
+                start_idx = max(0, edit.location.start_line - 1)
+                end_idx = min(len(lines), edit.location.end_line)
+                
+                new_lines = lines[:start_idx] + lines[end_idx:]
+                return '\n'.join(new_lines)
+                
+        except Exception as e:
+            print(f"简单编辑应用失败: {e}")
+            
+        return content  # 如果失败，返回原始内容
+
+    async def apply_diff_patch(self, patch_info: Dict[str, Any], create_backup: bool = True) -> Dict[str, Any]:
+        """应用差异补丁到文件"""
+        result = {
+            'success': False,
+            'file_path': patch_info['file_path'],
+            'backup_path': None,
+            'error': None
+        }
+        
+        try:
+            file_path = patch_info['file_path']
+            
+            # 1. 创建备份
+            if create_backup:
+                backup_path = f"{file_path}.backup_{int(time.time())}"
+                shutil.copy2(file_path, backup_path)
+                result['backup_path'] = backup_path
+            
+            # 2. 应用修改
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(patch_info['modified_content'])
+            
+            result['success'] = True
+            print(f"成功应用差异补丁到文件: {file_path}")
+            
+        except Exception as e:
+            result['error'] = str(e)
+            print(f"应用差异补丁失败: {e}")
+            
+        return result
+
+    async def apply_multiple_patches(self, patches: List[Dict[str, Any]], create_backup: bool = True) -> Dict[str, Any]:
+        """批量应用多个差异补丁"""
+        results = {
+            'success': True,
+            'applied_patches': [],
+            'failed_patches': [],
+            'backup_paths': []
+        }
+        
+        for patch in patches:
+            result = await self.apply_diff_patch(patch, create_backup)
+            
+            if result['success']:
+                results['applied_patches'].append(patch['file_path'])
+                if result['backup_path']:
+                    results['backup_paths'].append(result['backup_path'])
+            else:
+                results['failed_patches'].append({
+                    'file_path': patch['file_path'],
+                    'error': result['error']
+                })
+                results['success'] = False
+        
+        return results
+
     def apply_semantic_edits(self, edits: List[SemanticEdit]) -> Dict[str, Any]:
         """应用语义编辑操作"""
         if not self.code_editor:

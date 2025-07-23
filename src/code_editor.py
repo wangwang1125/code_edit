@@ -129,7 +129,9 @@ class AICodeAnalyzer:
 3. 生成安全的编辑操作
 4. 评估修改的影响和风险
 
-请以JSON格式返回编辑计划，包含以下字段：
+请以JSON格式返回编辑计划，必须用```json ```包裹JSON内容，包含以下字段：
+
+```json
 {{
     "description": "编辑计划描述",
     "operations": [
@@ -147,6 +149,9 @@ class AICodeAnalyzer:
     "safety_score": 0.0-1.0,
     "requires_confirmation": true/false
 }}
+```
+
+注意：请严格按照上述格式返回，JSON内容必须用```json ```包裹。
 """
     
     def _get_file_content(self, file_path: str) -> str:
@@ -207,7 +212,22 @@ class AICodeAnalyzer:
     def _parse_ai_response(self, response: str) -> Dict[str, Any]:
         """解析AI响应"""
         try:
-            # 尝试提取JSON部分
+            # 首先尝试提取```json ```包裹的JSON内容
+            json_block_match = re.search(r'```json\s*\n(.*?)\n```', response, re.DOTALL)
+            if json_block_match:
+                json_str = json_block_match.group(1).strip()
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    print(f"JSON代码块解析失败，尝试修复: {str(e)}")
+                    # 尝试修复常见的JSON格式问题
+                    fixed_json = self._fix_json_format(json_str)
+                    try:
+                        return json.loads(fixed_json)
+                    except json.JSONDecodeError:
+                        print(f"JSON代码块修复失败，尝试其他方法...")
+            
+            # 如果没有找到```json ```包裹的内容，尝试提取普通JSON
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group()

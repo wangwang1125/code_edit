@@ -54,6 +54,25 @@ class ConfigRequest(BaseModel):
     key: str = Field(..., description="配置键")
     value: str = Field(..., description="配置值")
 
+class SearchAndAnalyzeRequest(BaseModel):
+    query: str = Field(..., description="搜索和编辑查询")
+    project_path: Optional[str] = Field(None, description="项目路径（可选）")
+    top_k: int = Field(10, description="返回结果数量")
+    filter_language: Optional[str] = Field(None, description="过滤编程语言")
+    filter_file_type: Optional[str] = Field(None, description="过滤文件类型")
+    use_hybrid_search: bool = Field(True, description="是否使用混合搜索")
+
+class SearchAndEditRequest(BaseModel):
+    query: str = Field(..., description="搜索和编辑查询")
+    project_path: Optional[str] = Field(None, description="项目路径（可选）")
+    top_k: int = Field(10, description="返回结果数量")
+    filter_language: Optional[str] = Field(None, description="过滤编程语言")
+    filter_file_type: Optional[str] = Field(None, description="过滤文件类型")
+    use_hybrid_search: bool = Field(True, description="是否使用混合搜索")
+    auto_apply: bool = Field(False, description="是否自动应用编辑")
+    confidence_threshold: float = Field(0.7, description="自动应用的置信度阈值")
+    generate_patch: bool = Field(False, description="是否生成差异补丁而不直接修改文件")
+
 class CodeEditRequest(BaseModel):
     request: str = Field(..., description="代码修改请求描述")
     search_results: List[Dict] = Field(..., description="搜索结果，用于确定修改目标")
@@ -150,6 +169,16 @@ async def root():
             <div class="endpoint">
                 <span class="method post">POST</span> <strong>/search</strong>
                 <p>搜索代码</p>
+            </div>
+            
+            <div class="endpoint">
+                <span class="method post">POST</span> <strong>/search_and_analyze_edit</strong>
+                <p>搜索代码并分析语义编辑 (新功能)</p>
+            </div>
+            
+            <div class="endpoint">
+                <span class="method post">POST</span> <strong>/search_and_edit</strong>
+                <p>搜索代码并直接执行编辑 (新功能)</p>
             </div>
             
             <div class="endpoint">
@@ -300,6 +329,63 @@ async def search_code(request: SearchRequest):
         import traceback
         print(f"搜索错误详情: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+@app.post("/search_and_analyze_edit")
+async def search_and_analyze_edit(request: SearchAndAnalyzeRequest):
+    """搜索代码并直接分析语义编辑请求 - 合并操作避免重复"""
+    if not client:
+        raise HTTPException(status_code=500, detail="客户端未初始化")
+    
+    project_path = None
+    if request.project_path:
+        project_path = str(Path(request.project_path).resolve())
+    
+    try:
+        result = await client.search_and_analyze_edit(
+            query=request.query,
+            project_path=project_path,
+            top_k=request.top_k,
+            filter_language=request.filter_language,
+            filter_file_type=request.filter_file_type,
+            use_hybrid_search=request.use_hybrid_search
+        )
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        print(f"搜索和分析错误详情: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"搜索和分析失败: {str(e)}")
+
+@app.post("/search_and_edit")
+async def search_and_edit(request: SearchAndEditRequest):
+    """搜索代码并直接执行语义编辑 - 一站式操作"""
+    if not client:
+        raise HTTPException(status_code=500, detail="客户端未初始化")
+    
+    project_path = None
+    if request.project_path:
+        project_path = str(Path(request.project_path).resolve())
+    
+    try:
+        result = await client.search_and_edit(
+            query=request.query,
+            project_path=project_path,
+            top_k=request.top_k,
+            filter_language=request.filter_language,
+            filter_file_type=request.filter_file_type,
+            use_hybrid_search=request.use_hybrid_search,
+            auto_apply=request.auto_apply,
+            confidence_threshold=request.confidence_threshold,
+            generate_patch=request.generate_patch
+        )
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        print(f"搜索和编辑错误详情: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"搜索和编辑失败: {str(e)}")
 
 @app.post("/context")
 async def get_context(request: ContextRequest):
@@ -723,6 +809,71 @@ async def rollback_last_edit():
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"回滚失败: {str(e)}")
+
+class PatchInfo(BaseModel):
+    file_path: str = Field(..., description="文件路径")
+    diff: str = Field(..., description="差异补丁内容")
+    edit_type: str = Field(..., description="编辑类型")
+    confidence: float = Field(..., description="置信度")
+    description: str = Field(..., description="编辑描述")
+
+class ApplyPatchRequest(BaseModel):
+    patch_info: PatchInfo = Field(..., description="补丁信息")
+    create_backup: bool = Field(True, description="是否创建备份")
+
+class ApplyMultiplePatchesRequest(BaseModel):
+    patches: List[PatchInfo] = Field(..., description="补丁列表")
+    create_backup: bool = Field(True, description="是否创建备份")
+
+@app.post("/edit/apply_patch")
+async def apply_diff_patch(request: ApplyPatchRequest):
+    """应用单个差异补丁"""
+    if not client:
+        raise HTTPException(status_code=500, detail="客户端未初始化")
+    
+    try:
+        # 构造补丁信息字典
+        patch_info = {
+            'file_path': request.patch_info.file_path,
+            'diff': request.patch_info.diff,
+            'edit_type': request.patch_info.edit_type,
+            'confidence': request.patch_info.confidence,
+            'description': request.patch_info.description
+        }
+        
+        result = client.apply_diff_patch(patch_info, request.create_backup)
+        return result
+        
+    except Exception as e:
+        import traceback
+        print(f"应用补丁错误详情: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"应用补丁失败: {str(e)}")
+
+@app.post("/edit/apply_patches")
+async def apply_multiple_patches(request: ApplyMultiplePatchesRequest):
+    """批量应用多个差异补丁"""
+    if not client:
+        raise HTTPException(status_code=500, detail="客户端未初始化")
+    
+    try:
+        # 构造补丁信息列表
+        patches = []
+        for patch in request.patches:
+            patches.append({
+                'file_path': patch.file_path,
+                'diff': patch.diff,
+                'edit_type': patch.edit_type,
+                'confidence': patch.confidence,
+                'description': patch.description
+            })
+        
+        result = client.apply_multiple_patches(patches, request.create_backup)
+        return result
+        
+    except Exception as e:
+        import traceback
+        print(f"批量应用补丁错误详情: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"批量应用补丁失败: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(
